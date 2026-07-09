@@ -5,14 +5,14 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from .. import cache, notifications
+from .. import cache
 from ..auth import get_current_user
 from ..database import get_db
 from ..errors import AppError
 from ..models import Booking, Room, User
 from ..schemas import BookingCreateRequest
 from ..serializers import serialize_booking
-from ..services import ratelimit, reference
+from ..services import notifications, ratelimit, reference
 from ..services.refunds import log_refund
 from ..timeutils import iso_utc, parse_input_datetime
 
@@ -129,17 +129,10 @@ def list_bookings(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    # Bug 30 fix: admins may read all bookings in their organisation (Rule 9);
-    # the previous code filtered by user_id unconditionally, hiding all other
-    # members' bookings from admins.
-    if user.role == "admin":
-        base = (
-            db.query(Booking)
-            .join(Room, Booking.room_id == Room.id)
-            .filter(Room.org_id == user.org_id)
-        )
-    else:
-        base = db.query(Booking).filter(Booking.user_id == user.id)
+    # Rule 11: "Items are the caller's own bookings" — even admins see only
+    # their own bookings in the list. Admin read access to other members'
+    # bookings is via GET /bookings/{id} (Rule 10).
+    base = db.query(Booking).filter(Booking.user_id == user.id)
 
     total = base.count()
     items = (
