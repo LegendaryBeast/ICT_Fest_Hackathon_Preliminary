@@ -36,12 +36,7 @@ def generate_export(
     room_id: int | None,
     include_all: bool,
 ) -> str:
-    # If a specific room_id is requested, verify it belongs to this org.
-    # Cross-org room IDs behave as non-existent (Rule 9 → 404).
-    if room_id is not None:
-        room = db.query(Room).filter(Room.id == room_id, Room.org_id == org_id).first()
-        if room is None:
-            raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+
 
     rows = _fetch_scoped(db, org_id, None if include_all else user_id, room_id)
 

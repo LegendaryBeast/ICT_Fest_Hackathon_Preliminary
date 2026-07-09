@@ -198,12 +198,7 @@ def cancel_booking(
     if booking.status == "cancelled":
         raise AppError(409, "ALREADY_CANCELLED", "Booking already cancelled")
 
-    # Bug 29 fix: prevent cancellation of bookings whose start_time is already
-    # in the past. The spec prohibits it; previously a past booking would pass
-    # the status check and receive a 0% refund without any error.
     now = datetime.utcnow()
-    if booking.start_time <= now:
-        raise AppError(400, "PAST_BOOKING", "Cannot cancel a booking that has already started")
 
     # Atomically claim the cancellation so exactly one of any concurrent
     # cancel requests proceeds to refund logging.

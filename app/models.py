@@ -35,7 +35,6 @@ class User(Base):
 
 class Room(Base):
     __tablename__ = "rooms"
-    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_room_org_name"),)
 
     id = Column(Integer, primary_key=True)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
