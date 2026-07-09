@@ -4,6 +4,7 @@ import io
 
 from sqlalchemy.orm import Session
 
+from ..errors import AppError
 from ..models import Booking, Room
 from ..timeutils import iso_utc
 
@@ -35,8 +36,13 @@ def generate_export(
     room_id: int | None,
     include_all: bool,
 ) -> str:
-    # Every path stays scoped to the caller's org; a cross-org room_id simply
-    # matches nothing.
+    # If a specific room_id is requested, verify it belongs to this org.
+    # Cross-org room IDs behave as non-existent (Rule 9 → 404).
+    if room_id is not None:
+        room = db.query(Room).filter(Room.id == room_id, Room.org_id == org_id).first()
+        if room is None:
+            raise AppError(404, "ROOM_NOT_FOUND", "Room not found")
+
     rows = _fetch_scoped(db, org_id, None if include_all else user_id, room_id)
 
     buffer = io.StringIO()
