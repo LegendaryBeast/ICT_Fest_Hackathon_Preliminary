@@ -19,5 +19,10 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        # Bug 36 fix: always roll back the session on any exception so the
+        # underlying connection is returned to the pool in a clean state.
+        db.rollback()
+        raise
     finally:
         db.close()

@@ -22,7 +22,11 @@ from .models import User
 
 # jtis of access tokens presented to /auth/logout and of refresh tokens that
 # have already been used are recorded here so they can no longer be used.
-_revoked_tokens: set[str] = set()
+#
+# Bug 33 fix: changed from set[str] to dict[str, int] (jti -> exp timestamp)
+# and added _prune_revoked() so entries are evicted once their token expires,
+# preventing unbounded memory growth under sustained traffic.
+_revoked_tokens: dict[str, int] = {}
 _revocation_lock = threading.Lock()
 
 _PBKDF2_ROUNDS = 100_000
@@ -45,6 +49,17 @@ def verify_password(password: str, stored: str) -> bool:
 
 def _now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
+
+
+def _prune_revoked() -> None:
+    """Remove JTIs whose tokens have already expired.
+
+    Must be called while holding _revocation_lock.
+    """
+    now = _now_ts()
+    expired = [jti for jti, exp in _revoked_tokens.items() if exp < now]
+    for jti in expired:
+        del _revoked_tokens[jti]
 
 
 def create_access_token(user: User) -> str:
@@ -85,7 +100,8 @@ def decode_token(token: str) -> dict:
 
 
 def revoke_access_token(payload: dict) -> None:
-    _revoked_tokens.add(payload["jti"])
+    with _revocation_lock:
+        _revoked_tokens[payload["jti"]] = payload["exp"]
 
 
 def consume_token_jti(payload: dict) -> bool:
@@ -94,7 +110,7 @@ def consume_token_jti(payload: dict) -> bool:
     with _revocation_lock:
         if jti in _revoked_tokens:
             return False
-        _revoked_tokens.add(jti)
+        _revoked_tokens[jti] = payload["exp"]
         return True
 
 
@@ -106,8 +122,10 @@ def get_token_payload(request: Request) -> dict:
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise AppError(401, "UNAUTHORIZED", "Wrong token type")
-    if payload.get("jti") in _revoked_tokens:
-        raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
+    with _revocation_lock:
+        _prune_revoked()
+        if payload.get("jti") in _revoked_tokens:
+            raise AppError(401, "UNAUTHORIZED", "Token has been revoked")
     return payload
 
 
@@ -121,7 +139,13 @@ def get_current_user(
     return user
 
 
-def require_admin(user: User = Depends(get_current_user)) -> User:
+def require_admin(
+    payload: dict = Depends(get_token_payload),
+    db: Session = Depends(get_db),
+) -> User:
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if user is None:
+        raise AppError(401, "UNAUTHORIZED", "Unknown user")
     if user.role != "admin":
-        raise AppError(403, "FORBIDDEN", "Admin privileges required")
+        raise AppError(403, "FORBIDDEN", "Admin access required")
     return user

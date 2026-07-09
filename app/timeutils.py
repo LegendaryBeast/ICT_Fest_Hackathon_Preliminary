@@ -8,7 +8,7 @@ def parse_input_datetime(value: str) -> datetime:
     Inputs that carry a UTC offset are normalized to UTC; naive inputs are
     treated as UTC as-is.
     """
-    dt = datetime.fromisoformat(value)
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt

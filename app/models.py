@@ -35,6 +35,7 @@ class User(Base):
 
 class Room(Base):
     __tablename__ = "rooms"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_room_org_name"),)
 
     id = Column(Integer, primary_key=True)
     org_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
@@ -52,7 +53,7 @@ class Booking(Base):
     start_time = Column(DateTime, nullable=False, index=True)
     end_time = Column(DateTime, nullable=False)
     status = Column(String, nullable=False, default="confirmed")
-    reference_code = Column(String, nullable=False, index=True)
+    reference_code = Column(String, nullable=False, unique=True, index=True)
     price_cents = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 

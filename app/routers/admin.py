@@ -32,6 +32,11 @@ def usage_report(
     except ValueError:
         raise AppError(400, "INVALID_BOOKING_WINDOW", "Invalid date range")
 
+    # Bug 35 fix: reject inverted ranges explicitly rather than silently
+    # returning a structurally valid but empty report.
+    if from_date > to_date:
+        raise AppError(400, "INVALID_BOOKING_WINDOW", "from date must not be after to date")
+
     range_start = datetime.combine(from_date, time.min)
     range_end = datetime.combine(to_date + timedelta(days=1), time.min)
 

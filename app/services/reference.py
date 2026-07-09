@@ -4,23 +4,16 @@ Codes are issued from a monotonic counter and formatted into a short,
 customer-friendly string such as ``CW-001042``.
 """
 import threading
-import time
 
 _counter = {"value": 1000}
 _lock = threading.Lock()
 
 
-def _format_pause() -> None:
-    # The reference code is padded and prefixed for display; the formatting
-    # step is kept together with issuance so codes stay sequential.
-    time.sleep(0.12)
-
-
 def next_reference_code() -> str:
-    # Read + increment must be atomic or concurrent requests are issued the
-    # same code.
+    # Bug 43 fix: removed _format_pause() — it slept 120 ms inside the lock,
+    # serialising all concurrent booking creations behind a single mutex.
+    # Read + increment remains atomic under the lock.
     with _lock:
         current = _counter["value"]
         _counter["value"] = current + 1
-    _format_pause()
     return f"CW-{current:06d}"

@@ -1,0 +1,290 @@
+{
+  "info": {
+    "title": "CoWork API — bug verification test cases",
+    "base_url": "http://localhost:8000",
+    "how_to_use": [
+      "Run the setup requests in order first; capture the values named in 'save' from each response into variables.",
+      "{{VAR}} placeholders refer to those captured variables.",
+      "Datetime placeholders use the convention {{NOW+<offset>}}: replace with an ISO-8601 UTC timestamp that far from the current time, aligned to a whole minute, e.g. {{NOW+30h}} -> 2026-07-10T18:00:00Z. Whole-hour durations matter.",
+      "'expected' describes CORRECT behavior per the spec. 'bug_observed' is what the broken code currently returns — a test passes once expected behavior is seen.",
+      "Cases in 'concurrency_tests' must be fired in parallel (e.g. xargs -P, threads, or Postman collection runner with parallel iterations)."
+    ]
+  },
+
+  "setup": [
+    {
+      "id": "S1",
+      "name": "Register org A admin (new org_name -> admin)",
+      "request": { "method": "POST", "path": "/auth/register", "body": { "org_name": "acme", "username": "alice", "password": "pass123" } },
+      "expected": { "status": 201, "body_contains": { "role": "admin" } },
+      "save": { "ALICE_ID": "$.user_id", "ORG_ID": "$.org_id" }
+    },
+    {
+      "id": "S2",
+      "name": "Register org A member (known org_name -> member)",
+      "request": { "method": "POST", "path": "/auth/register", "body": { "org_name": "acme", "username": "bob", "password": "pass123" } },
+      "expected": { "status": 201, "body_contains": { "role": "member" } },
+      "save": { "BOB_ID": "$.user_id" }
+    },
+    {
+      "id": "S3",
+      "name": "Login admin",
+      "request": { "method": "POST", "path": "/auth/login", "body": { "org_name": "acme", "username": "alice", "password": "pass123" } },
+      "expected": { "status": 200, "body_contains": { "token_type": "bearer" } },
+      "save": { "ADMIN_TOKEN": "$.access_token", "ADMIN_REFRESH": "$.refresh_token" }
+    },
+    {
+      "id": "S4",
+      "name": "Login member",
+      "request": { "method": "POST", "path": "/auth/login", "body": { "org_name": "acme", "username": "bob", "password": "pass123" } },
+      "expected": { "status": 200 },
+      "save": { "MEMBER_TOKEN": "$.access_token", "MEMBER_REFRESH": "$.refresh_token" }
+    },
+    {
+      "id": "S5",
+      "name": "Create room (rate 1000)",
+      "request": { "method": "POST", "path": "/rooms", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "name": "Focus Room", "capacity": 4, "hourly_rate_cents": 1000 } },
+      "expected": { "status": 201 },
+      "save": { "ROOM_ID": "$.id" }
+    },
+    {
+      "id": "S6",
+      "name": "Create room (odd rate 1001, for rounding test)",
+      "request": { "method": "POST", "path": "/rooms", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "name": "Odd Room", "capacity": 2, "hourly_rate_cents": 1001 } },
+      "expected": { "status": 201 },
+      "save": { "ODD_ROOM_ID": "$.id" }
+    },
+    {
+      "id": "S7",
+      "name": "Register org B admin (tenancy tests)",
+      "request": { "method": "POST", "path": "/auth/register", "body": { "org_name": "globex", "username": "eve", "password": "pass123" } },
+      "expected": { "status": 201, "body_contains": { "role": "admin" } }
+    },
+    {
+      "id": "S8",
+      "name": "Login org B admin",
+      "request": { "method": "POST", "path": "/auth/login", "body": { "org_name": "globex", "username": "eve", "password": "pass123" } },
+      "expected": { "status": 200 },
+      "save": { "ORGB_TOKEN": "$.access_token" }
+    }
+  ],
+
+  "test_cases": [
+    {
+      "id": "TC-01", "bug": 1, "name": "Access token lifetime must be exactly 900s",
+      "request": { "method": "POST", "path": "/auth/login", "body": { "org_name": "acme", "username": "alice", "password": "pass123" } },
+      "expected": { "status": 200, "check": "base64-decode access_token payload: exp - iat == 900" },
+      "bug_observed": "exp - iat == 54000 (900 minutes)"
+    },
+    {
+      "id": "TC-02", "bug": 2, "name": "Logout invalidates the presented access token",
+      "steps": [
+        { "request": { "method": "POST", "path": "/auth/logout", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" } }, "expected": { "status": 200 } },
+        { "request": { "method": "GET", "path": "/rooms", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" } }, "expected": { "status": 401 } }
+      ],
+      "bug_observed": "second request returns 200 — token still valid after logout",
+      "note": "Re-login bob afterwards to refresh {{MEMBER_TOKEN}} for later cases"
+    },
+    {
+      "id": "TC-03", "bug": 3, "name": "Refresh token is single-use",
+      "steps": [
+        { "request": { "method": "POST", "path": "/auth/refresh", "body": { "refresh_token": "{{ADMIN_REFRESH}}" } }, "expected": { "status": 200 } },
+        { "request": { "method": "POST", "path": "/auth/refresh", "body": { "refresh_token": "{{ADMIN_REFRESH}}" } }, "expected": { "status": 401 } }
+      ],
+      "bug_observed": "reuse also returns 200 with fresh tokens"
+    },
+    {
+      "id": "TC-04", "bug": 4, "name": "Duplicate username in same org -> 409 USERNAME_TAKEN",
+      "request": { "method": "POST", "path": "/auth/register", "body": { "org_name": "acme", "username": "alice", "password": "different-pw" } },
+      "expected": { "status": 409, "body": { "code": "USERNAME_TAKEN" } },
+      "bug_observed": "201 with the EXISTING user's {user_id, org_id, username, role}"
+    },
+    {
+      "id": "TC-05", "bug": 5, "name": "Input datetime with UTC offset is converted to UTC",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+6d, rendered with +06:00 offset, e.g. 2026-07-15T18:00:00+06:00}}", "end_time": "{{same instant +1h, e.g. 2026-07-15T19:00:00+06:00}}" } },
+      "expected": { "status": 201, "check": "response start_time equals the same INSTANT in UTC (18:00+06:00 -> 12:00:00+00:00 / Z)" },
+      "bug_observed": "offset dropped: returns 18:00:00+00:00 (wrong instant, 6h late)",
+      "cleanup": "cancel this booking"
+    },
+    {
+      "id": "TC-06", "bug": 6, "name": "start_time in the past -> 400, no grace window",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW-3m}}", "end_time": "{{NOW+57m}}" } },
+      "expected": { "status": 400, "body": { "code": "INVALID_BOOKING_WINDOW" } },
+      "bug_observed": "201 — anything newer than now-300s is accepted"
+    },
+    {
+      "id": "TC-07a", "bug": 7, "name": "Zero duration (end == start) -> 400",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+26h}}", "end_time": "{{NOW+26h}}" } },
+      "expected": { "status": 400, "body": { "code": "INVALID_BOOKING_WINDOW" } },
+      "bug_observed": "201 with price_cents = 0"
+    },
+    {
+      "id": "TC-07b", "bug": 7, "name": "Negative duration (end < start) -> 400",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+40h}}", "end_time": "{{NOW+38h}}" } },
+      "expected": { "status": 400, "body": { "code": "INVALID_BOOKING_WINDOW" } },
+      "bug_observed": "201 with NEGATIVE price_cents (-2000)"
+    },
+    {
+      "id": "TC-07c", "bug": 7, "name": "Sanity: 9-hour duration -> 400 (max 8) — already correct",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+26h}}", "end_time": "{{NOW+35h}}" } },
+      "expected": { "status": 400, "body": { "code": "INVALID_BOOKING_WINDOW" } }
+    },
+    {
+      "id": "TC-08", "bug": 8, "name": "Back-to-back bookings are allowed",
+      "steps": [
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+48h}}", "end_time": "{{NOW+49h}}" } }, "expected": { "status": 201 }, "save": { "BOOKING_A": "$.id" } },
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+49h}}", "end_time": "{{NOW+50h}}" } }, "expected": { "status": 201, "note": "starts exactly when A ends -> allowed" } }
+      ],
+      "bug_observed": "second request -> 409 ROOM_CONFLICT",
+      "also_verify": "a truly overlapping request ({{NOW+48h30m}}..{{NOW+49h30m}}) still -> 409 ROOM_CONFLICT"
+    },
+    {
+      "id": "TC-09", "bug": 9, "name": "GET /bookings/{id} returns the real start_time",
+      "request": { "method": "GET", "path": "/bookings/{{BOOKING_A}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } },
+      "expected": { "status": 200, "check": "start_time == {{NOW+48h}} (the booked slot), != created_at; response includes refunds: []" },
+      "bug_observed": "start_time equals created_at (booking creation timestamp)"
+    },
+    {
+      "id": "TC-10", "bug": 10, "name": "Member cannot read another member's booking",
+      "request": { "method": "GET", "path": "/bookings/{{BOOKING_A}}", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" } },
+      "expected": { "status": 404, "body": { "code": "BOOKING_NOT_FOUND" }, "note": "BOOKING_A belongs to alice; bob is a member" },
+      "bug_observed": "200 with full booking details"
+    },
+    {
+      "id": "TC-11", "bug": "11-13", "name": "Pagination: ascending order, correct offset, limit respected",
+      "precondition": "caller has >= 5 bookings with distinct start_times",
+      "steps": [
+        { "request": { "method": "GET", "path": "/bookings?page=1&limit=2", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200, "check": "items are the 2 EARLIEST start_times, ascending; len(items)==2; total == full count" } },
+        { "request": { "method": "GET", "path": "/bookings?page=2&limit=2", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "items 3-4 of the same ascending ordering; no skip/repeat vs page 1" } },
+        { "request": { "method": "GET", "path": "/bookings?page=1&limit=100", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "returns ALL bookings (limit param honored, not capped at 10)" } }
+      ],
+      "bug_observed": "descending order; page 1 starts at item 3 (offset=page*limit); every page returns up to 10 items regardless of limit"
+    },
+    {
+      "id": "TC-12", "bug": 14, "name": "Cancel with ~48.5h notice -> 100% refund",
+      "steps": [
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+48h30m}}", "end_time": "{{NOW+49h30m}}" } }, "expected": { "status": 201 }, "save": { "B48": "$.id" } },
+        { "request": { "method": "POST", "path": "/bookings/{{B48}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200, "body": { "status": "cancelled", "refund_percent": 100, "refund_amount_cents": 1000 } } }
+      ],
+      "bug_observed": "refund_percent: 50, refund_amount_cents: 500"
+    },
+    {
+      "id": "TC-13", "bug": 15, "name": "Cancel with 2h notice -> 0% refund",
+      "steps": [
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+2h}}", "end_time": "{{NOW+3h}}" } }, "expected": { "status": 201 }, "save": { "B2H": "$.id" } },
+        { "request": { "method": "POST", "path": "/bookings/{{B2H}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200, "body": { "refund_percent": 0, "refund_amount_cents": 0 } } }
+      ],
+      "bug_observed": "refund_percent: 50, refund_amount_cents: 500"
+    },
+    {
+      "id": "TC-14", "bug": 16, "name": "Refund rounds half-cents UP and matches the RefundLog (price 1001 @ 50%)",
+      "steps": [
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ODD_ROOM_ID}}", "start_time": "{{NOW+30h}}", "end_time": "{{NOW+31h}}" } }, "expected": { "status": 201, "body_contains": { "price_cents": 1001 } }, "save": { "BODD": "$.id" } },
+        { "request": { "method": "POST", "path": "/bookings/{{BODD}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200, "body": { "refund_percent": 50, "refund_amount_cents": 501 }, "note": "500.5 rounds up to 501" } },
+        { "request": { "method": "GET", "path": "/bookings/{{BODD}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "refunds has EXACTLY 1 entry and refunds[0].amount_cents == 501 == cancel response amount" } }
+      ],
+      "bug_observed": "response 500 and ledger 500 (and for price 999 they even differ: 500 vs 499)"
+    },
+    {
+      "id": "TC-15", "bug": "sanity", "name": "Double cancel (sequential) -> 409 ALREADY_CANCELLED",
+      "request": { "method": "POST", "path": "/bookings/{{BODD}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } },
+      "expected": { "status": 409, "body": { "code": "ALREADY_CANCELLED" } }
+    },
+    {
+      "id": "TC-16", "bug": 17, "name": "Usage report reflects a new booking immediately (cache invalidation on create)",
+      "steps": [
+        { "request": { "method": "GET", "path": "/admin/usage-report?from={{TODAY}}&to={{TODAY+10d}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200 }, "save": { "COUNT_BEFORE": "$.rooms[?room_id=={{ROOM_ID}}].confirmed_bookings" } },
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+72h}}", "end_time": "{{NOW+73h}}" } }, "expected": { "status": 201 }, "save": { "B72": "$.id" } },
+        { "request": { "method": "GET", "path": "/admin/usage-report?from={{TODAY}}&to={{TODAY+10d}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "confirmed_bookings for ROOM_ID == COUNT_BEFORE + 1 and revenue_cents grew by 1000" } }
+      ],
+      "bug_observed": "identical (stale cached) report after the new booking"
+    },
+    {
+      "id": "TC-17", "bug": 18, "name": "Availability reflects a cancellation immediately (cache invalidation on cancel)",
+      "steps": [
+        { "request": { "method": "GET", "path": "/rooms/{{ROOM_ID}}/availability?date={{DATE_OF NOW+72h}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "busy contains the {{NOW+72h}} interval" } },
+        { "request": { "method": "POST", "path": "/bookings/{{B72}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "status": 200 } },
+        { "request": { "method": "GET", "path": "/rooms/{{ROOM_ID}}/availability?date={{DATE_OF NOW+72h}}", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } }, "expected": { "check": "that interval is GONE from busy" } }
+      ],
+      "bug_observed": "cancelled booking still listed as busy (stale cache)"
+    },
+    {
+      "id": "TC-18", "bug": 19, "name": "Export must not leak another org's rooms (include_all + cross-org room_id)",
+      "request": { "method": "GET", "path": "/admin/export?include_all=true&room_id={{ROOM_ID}}", "headers": { "Authorization": "Bearer {{ORGB_TOKEN}}" } },
+      "expected": { "status": 200, "check": "CSV contains ONLY the header row (org B has no such room): id,reference_code,room_id,user_id,start_time,end_time,status,price_cents" },
+      "bug_observed": "org A's booking rows are returned to org B's admin"
+    },
+    {
+      "id": "TC-19", "bug": "tenancy-sanity", "name": "Cross-org room id behaves as non-existent on reads",
+      "request": { "method": "GET", "path": "/rooms/{{ROOM_ID}}/stats", "headers": { "Authorization": "Bearer {{ORGB_TOKEN}}" } },
+      "expected": { "status": 404, "body": { "code": "ROOM_NOT_FOUND" } }
+    },
+    {
+      "id": "TC-20", "bug": "quota-sanity", "name": "4th booking starting within (now, now+24h] -> 409 QUOTA_EXCEEDED (sequential)",
+      "steps": [
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+3h}}", "end_time": "{{NOW+4h}}" } }, "expected": { "status": 201 } },
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+5h}}", "end_time": "{{NOW+6h}}" } }, "expected": { "status": 201 } },
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+7h}}", "end_time": "{{NOW+8h}}" } }, "expected": { "status": 201 } },
+        { "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+9h}}", "end_time": "{{NOW+10h}}" } }, "expected": { "status": 409, "body": { "code": "QUOTA_EXCEEDED" } } }
+      ],
+      "note": "use non-adjacent slots so the back-to-back bug (TC-08) doesn't interfere before it is fixed"
+    },
+    {
+      "id": "TC-21", "bug": 27, "name": "Malformed datetime -> 400/422, never 500",
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "not-a-date", "end_time": "{{NOW+31h}}" } },
+      "expected": { "status": 400, "body": { "code": "INVALID_BOOKING_WINDOW" }, "note": "a 422 framework error is also acceptable; a 500 is a bug" },
+      "bug_observed": "500 Internal Server Error (uncaught ValueError from datetime.fromisoformat in timeutils.py:11)"
+    }
+  ],
+
+  "concurrency_tests": [
+    {
+      "id": "CC-01", "bug": 20, "name": "No double-booking under concurrency",
+      "parallel": 4,
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ROOM_ID}}", "start_time": "{{NOW+80h}}", "end_time": "{{NOW+81h}}" } },
+      "expected": "exactly one 201; the other three 409 ROOM_CONFLICT",
+      "bug_observed": "all four 201 (four confirmed bookings for the same slot)"
+    },
+    {
+      "id": "CC-02", "bug": 21, "name": "Quota holds under concurrency",
+      "parallel": 6,
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{FRESH_MEMBER_TOKEN}}" }, "body": { "room_id": "{{DISTINCT_ROOM_i}}", "start_time": "{{NOW+(10+i)h}}", "end_time": "{{NOW+(11+i)h}}" }, "note": "6 different rooms / slots, same fresh member, all starting within 24h" },
+      "expected": "exactly three 201; three 409 QUOTA_EXCEEDED",
+      "bug_observed": "all six 201"
+    },
+    {
+      "id": "CC-03", "bug": 22, "name": "Rate limit 20/60s holds under concurrent bursts",
+      "parallel": 30,
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{FRESH_MEMBER_TOKEN_2}}" }, "body": { "room_id": 999999, "start_time": "{{NOW+5h}}", "end_time": "{{NOW+6h}}" }, "note": "invalid room is fine — ALL requests count toward the limit" },
+      "expected": "20 requests processed (404 ROOM_NOT_FOUND), 10 rejected with 429 RATE_LIMITED",
+      "bug_observed": "thirty 404s, zero 429s (lost-update race in the limiter)"
+    },
+    {
+      "id": "CC-04", "bug": 23, "name": "Reference codes unique under concurrent creation",
+      "parallel": 5,
+      "request": { "method": "POST", "path": "/bookings", "headers": { "Authorization": "Bearer {{MEMBER_TOKEN}}" }, "body": { "room_id": "{{ODD_ROOM_ID}}", "start_time": "{{NOW+(90+2i)h}}", "end_time": "{{NOW+(91+2i)h}}" }, "note": "5 disjoint slots so all succeed" },
+      "expected": "5 distinct reference_code values",
+      "bug_observed": "all five identical (e.g. CW-001011)"
+    },
+    {
+      "id": "CC-05", "bug": 24, "name": "Room stats consistent after a concurrent burst",
+      "check_after": { "method": "GET", "path": "/rooms/{{ODD_ROOM_ID}}/stats", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } },
+      "expected": "total_confirmed_bookings == number of confirmed bookings actually created (e.g. 5 after CC-04), total_revenue_cents == their summed price_cents",
+      "bug_observed": "count 1, revenue 1001 after five concurrent 1001-cent bookings"
+    },
+    {
+      "id": "CC-06", "bug": 25, "name": "Concurrent cancel of the same booking: one winner, one RefundLog",
+      "parallel": 2,
+      "request": { "method": "POST", "path": "/bookings/{{FRESH_BOOKING_ID}}/cancel", "headers": { "Authorization": "Bearer {{ADMIN_TOKEN}}" } },
+      "expected": "one 200, one 409 ALREADY_CANCELLED; GET /bookings/{id} then shows exactly ONE refunds entry equal to the 200 response's amount",
+      "bug_observed": "both 200; two RefundLog entries"
+    },
+    {
+      "id": "CC-07", "bug": 26, "name": "Liveness: concurrent creates + cancels never hang",
+      "parallel": 16,
+      "request": { "note": "8 x POST /bookings (disjoint future slots) interleaved with 8 x POST /bookings/{precreated_id}/cancel, fired simultaneously with a 10s client timeout" },
+      "expected": "all 16 respond (201/200/409...) within the timeout; subsequent bookings still work",
+      "bug_observed": "15/16 requests hang forever (ABBA deadlock email-lock vs audit-lock); every later create/cancel also hangs until restart"
+    }
+  ]
+}

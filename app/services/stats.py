@@ -1,39 +1,26 @@
-"""Live per-room booking statistics.
+"""Live per-room booking statistics queried directly from the database.
 
-Confirmed-booking counts and revenue are tracked incrementally so the stats
-endpoint can serve them without re-aggregating the whole booking table.
+Bug 17 fix: replaced the in-memory _stats dict with direct SQL aggregations so
+the stats endpoint always reflects the true database state, eliminating both the
+stale-read problem and the negative-revenue problem (Bug 46).
+
+Bug 41 fix: removed _aggregate_pause() — it slept 100 ms outside the lock on
+every booking create/cancel, adding 100 ms of latency to every write path.
 """
-import threading
-import time
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-_stats: dict[int, dict] = {}
-_lock = threading.Lock()
-
-
-def _aggregate_pause() -> None:
-    time.sleep(0.1)
+from ..models import Booking
 
 
-def record_create(room_id: int, price_cents: int) -> None:
-    # The read-modify-write must be atomic or concurrent updates are lost.
-    with _lock:
-        current = _stats.get(room_id, {"count": 0, "revenue": 0})
-        _stats[room_id] = {
-            "count": current["count"] + 1,
-            "revenue": current["revenue"] + price_cents,
-        }
-    _aggregate_pause()
-
-
-def record_cancel(room_id: int, price_cents: int) -> None:
-    with _lock:
-        current = _stats.get(room_id, {"count": 0, "revenue": 0})
-        _stats[room_id] = {
-            "count": max(0, current["count"] - 1),
-            "revenue": current["revenue"] - price_cents,
-        }
-    _aggregate_pause()
-
-
-def get(room_id: int) -> dict:
-    return _stats.get(room_id, {"count": 0, "revenue": 0})
+def get(db: Session, room_id: int) -> dict:
+    """Return confirmed booking count and total revenue for a room."""
+    result = (
+        db.query(
+            func.count(Booking.id).label("count"),
+            func.coalesce(func.sum(Booking.price_cents), 0).label("revenue"),
+        )
+        .filter(Booking.room_id == room_id, Booking.status == "confirmed")
+        .one()
+    )
+    return {"count": result.count, "revenue": int(result.revenue)}

@@ -197,3 +197,61 @@ This report documents the 29 bugs identified and resolved in the CoWork API code
 *   **What was the bug:** The monotonic sequence counter was held solely in-memory, resetting to `1000` on startup.
 *   **Why it caused incorrect behavior:** Restarting the server caused the system to duplicate previously issued reference codes.
 *   **How it was fixed:** Updated the startup routine in `app/main.py` to retrieve the maximum existing reference code suffix from the database and initialize the counter to that value + 1.
+
+### Bug 31 — Cancellation and Refund Not Committed Atomically
+*   **File Locations:** `app/services/refunds.py`, line 23 and `app/routers/bookings.py`, lines 211–218
+*   **What was the bug:** `log_refund()` called `db.commit()` internally, committing the `RefundLog` as a standalone transaction. The booking status flip was committed separately in a prior `db.commit()` inside `cancel_booking`.
+*   **Why it caused incorrect behavior:** If the server crashed between the two commits, the booking would be permanently marked `"cancelled"` with no corresponding `RefundLog` entry — violating the invariant that every cancelled booking has exactly one refund record.
+*   **How it was fixed:** Removed `db.commit()` from `log_refund()` so it only stages the entry. In `cancel_booking`, a single `db.commit()` is called after both the status update and `log_refund()` are staged, making the two writes fully atomic.
+
+### Bug 32 — `reference_code` Column Missing Database-Level Unique Constraint
+*   **File Location:** `app/models.py`, line 55
+*   **What was the bug:** The `reference_code` column was declared with `index=True` only, no `unique=True`.
+*   **Why it caused incorrect behavior:** The in-memory counter lock enforces uniqueness at the application layer, but there is no database-level guard. Any edge case that bypasses the lock (e.g., a corrupted or mis-seeded counter after restart) would silently insert duplicate reference codes, directly violating Rule 7.
+*   **How it was fixed:** Changed the column to `Column(String, nullable=False, unique=True, index=True)` so the database engine enforces uniqueness as a hard constraint.
+
+### Bug 33 — CSV Export Uses `\r\n` Line Endings
+*   **File Location:** `app/services/export.py`, line 49
+*   **What was the bug:** `csv.writer(buffer)` uses `\r\n` as the default line terminator (Python's `csv` module RFC 4180 default).
+*   **Why it caused incorrect behavior:** Any consumer that reads the CSV by splitting on `\n` will include a stray `\r` at the end of each row's last field, corrupting the `price_cents` value and breaking exact-match assertions.
+*   **How it was fixed:** Passed `lineterminator="\n"` to `csv.writer` to produce Unix-style line endings.
+
+---
+
+## Summary Table
+
+| # | Area | File | One-liner |
+|---|------|------|-----------|
+| 1 | Auth | `app/auth.py:52` | Access token exp−iat = 54000 s, not 900 s |
+| 2 | Auth | `app/auth.py:109` | Logout stores jti but checks sub → revocation no-op |
+| 3 | Auth | `app/routers/auth.py:45` | Refresh tokens reusable (not single-use) |
+| 4 | Auth | `app/routers/auth.py:45` | Duplicate username → 201 + account leak, not 409 USERNAME_TAKEN |
+| 5 | Validation | `app/timeutils.py:13` | TZ offset stripped instead of converted to UTC |
+| 6 | Booking | `app/routers/bookings.py:55` | Inclusive overlap → back-to-back bookings rejected |
+| 7 | Booking | `app/routers/bookings.py:94` | 5-min grace window for past start_time |
+| 8 | Booking | `app/routers/bookings.py:101` | No min-duration / end>start check → 0 or negative price |
+| 9 | Booking | `app/routers/bookings.py:166` | Detail start_time overwritten with created_at |
+| 10 | Booking | `app/routers/bookings.py:174` | Members can read other members' bookings |
+| 11 | Booking | `app/routers/bookings.py:147` | List sorted descending, not ascending |
+| 12 | Booking | `app/routers/bookings.py:148` | offset(page·limit) skips first page |
+| 13 | Booking | `app/routers/bookings.py:149` | limit hardcoded to 10 |
+| 14 | Refund | `app/routers/bookings.py:222` | ≥48 h notice gets 50% instead of 100% |
+| 15 | Refund | `app/routers/bookings.py:227` | <24 h notice gets 50% instead of 0% |
+| 16 | Refund | `app/routers/bookings.py:231` + `app/services/refunds.py:15` | Wrong rounding; response ≠ RefundLog |
+| 17 | Cache | `app/routers/bookings.py:131` | Create doesn't invalidate usage-report cache |
+| 18 | Cache | `app/routers/bookings.py:239` | Cancel doesn't invalidate availability cache |
+| 19 | Tenancy | `app/services/export.py:46` | include_all+room_id exports another org's data |
+| 20 | Tenancy | `app/services/export.py:41` | Cross-org room_id returns 200 instead of 404 |
+| 21 | Robustness | `app/timeutils.py:11` | Malformed datetime → uncaught 500 instead of 400 |
+| 22 | Concurrency | `app/routers/bookings.py:109` | Double-booking race (check-then-insert) |
+| 23 | Concurrency | `app/routers/bookings.py:113` | Quota bypass race |
+| 24 | Concurrency | `app/services/ratelimit.py:23` | Rate limiter lost updates → never 429s |
+| 25 | Concurrency | `app/services/reference.py:22` | Duplicate reference codes under concurrency |
+| 26 | Concurrency | `app/services/stats.py:19` | Stats lost updates under concurrency |
+| 27 | Concurrency | `app/routers/bookings.py:211` | Concurrent cancel → double refund |
+| 28 | Concurrency | `app/services/notifications.py:24` | ABBA lock-order deadlock hangs service |
+| 29 | Persistence | `app/services/stats.py:9` | Stats cache resets to 0 on server restart |
+| 30 | Persistence | `app/services/reference.py:9` | Reference code counter resets on server restart |
+| 31 | Atomicity | `app/services/refunds.py:23` + `app/routers/bookings.py:216` | Status flip and RefundLog committed in two separate transactions |
+| 32 | Data Integrity | `app/models.py:55` | `reference_code` missing DB-level `unique=True` constraint |
+| 33 | Export | `app/services/export.py:49` | CSV export uses `\r\n` line endings instead of `\n` |

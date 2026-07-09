@@ -2,6 +2,7 @@
 from datetime import datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import cache
@@ -45,6 +46,24 @@ def create_room(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
+    # Bug 25 fix: validate business-rule constraints that Pydantic does not
+    # enforce on its own — capacity must be positive and hourly rate non-negative.
+    if payload.capacity <= 0:
+        raise AppError(400, "INVALID_ROOM", "capacity must be greater than 0")
+    if payload.hourly_rate_cents < 0:
+        raise AppError(400, "INVALID_ROOM", "hourly_rate_cents must be non-negative")
+
+    # Bug 24 fix: check for an existing room with the same name in this org so
+    # we return 409 ROOM_NAME_TAKEN instead of letting SQLite raise an
+    # IntegrityError (which would otherwise produce a 500 Internal Server Error).
+    existing = (
+        db.query(Room)
+        .filter(Room.org_id == admin.org_id, Room.name == payload.name)
+        .first()
+    )
+    if existing is not None:
+        raise AppError(409, "ROOM_NAME_TAKEN", "A room with this name already exists")
+
     room = Room(
         org_id=admin.org_id,
         name=payload.name,
@@ -52,8 +71,17 @@ def create_room(
         hourly_rate_cents=payload.hourly_rate_cents,
     )
     db.add(room)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise AppError(409, "ROOM_NAME_TAKEN", "A room with this name already exists")
     db.refresh(room)
+
+    # Bug 28 fix: invalidate the usage-report cache so the new room appears
+    # immediately in the next report request.
+    cache.invalidate_report(admin.org_id)
+
     return _serialize_room(room)
 
 
@@ -107,7 +135,9 @@ def room_stats(
     user: User = Depends(get_current_user),
 ):
     room = _get_org_room(db, room_id, user.org_id)
-    current = stats.get(room.id)
+    # Bugs 17 & 46 fix: stats.get() now queries the DB directly, so the
+    # response is always accurate and can never go negative.
+    current = stats.get(db, room.id)
     return {
         "room_id": room.id,
         "total_confirmed_bookings": current["count"],

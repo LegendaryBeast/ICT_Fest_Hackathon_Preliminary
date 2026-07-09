@@ -13,6 +13,7 @@ from ..models import Booking, RefundLog
 
 
 def log_refund(db: Session, booking: Booking, amount_cents: int) -> RefundLog:
+    """Stage a RefundLog entry. The caller must call db.commit()."""
     entry = RefundLog(
         booking_id=booking.id,
         amount_cents=amount_cents,
@@ -20,6 +21,4 @@ def log_refund(db: Session, booking: Booking, amount_cents: int) -> RefundLog:
         processed_at=datetime.utcnow(),
     )
     db.add(entry)
-    db.commit()
-    db.refresh(entry)
     return entry

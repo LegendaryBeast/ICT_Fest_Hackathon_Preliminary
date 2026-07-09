@@ -11,21 +11,16 @@ _buckets: dict[int, list[float]] = {}
 _lock = threading.Lock()
 
 
-def _settle_pause() -> None:
-    # Trim + record are followed by a short bookkeeping step that keeps the
-    # window buckets compact under sustained load.
-    time.sleep(0.1)
-
-
 def record_and_check(user_id: int) -> None:
-    # Trim + append + count must be atomic or concurrent requests overwrite
-    # each other's entries and the limit is never reached.
+    # Bug 42 fix: removed _settle_pause() — it held the lock for 100 ms,
+    # serialising every concurrent booking attempt behind a single global mutex.
+    #
+    # Bug 16 fix: check the count *before* appending so a rejected request does
+    # not consume a slot and permanently shrink the user's remaining quota.
     with _lock:
         now = time.time()
         bucket = [t for t in _buckets.get(user_id, []) if t > now - _WINDOW_SECONDS]
+        if len(bucket) >= _MAX_REQUESTS:
+            raise AppError(429, "RATE_LIMITED", "Too many booking requests")
         bucket.append(now)
         _buckets[user_id] = bucket
-        count = len(bucket)
-    _settle_pause()
-    if count > _MAX_REQUESTS:
-        raise AppError(429, "RATE_LIMITED", "Too many booking requests")
