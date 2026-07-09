@@ -1,6 +1,6 @@
 # Bug Report — CoWork API
 
-This report documents the 44 unique, verified bugs identified and resolved in the CoWork API codebase. Each entry details the file location, the nature of the issue, why it caused incorrect behavior, and how it was fixed to satisfy the API contract.
+This report documents the 47 unique, verified bugs identified and resolved in the CoWork API codebase. Each entry details the file location, the nature of the issue, why it caused incorrect behavior, and how it was fixed to satisfy the API contract.
 
 ---
 
@@ -321,6 +321,28 @@ This report documents the 44 unique, verified bugs identified and resolved in th
 
 ---
 
+## 13. Second-Round Verification & Regression Fixes (3 bugs)
+
+### Bug 45 — Stale-Cache TOCTOU Race Condition in Usage-Report and Availability Caching
+*   **File Location:** `app/cache.py`, `app/routers/admin.py`, `app/routers/rooms.py`
+*   **What was the bug:** Between querying the DB for the current state and writing the computed result to the cache, a concurrent booking creation or cancellation could commit and trigger cache invalidation. If the writing of the stale result happened after the invalidation, it overwrote the invalidation, leaving stale data in the cache indefinitely.
+*   **Why it caused incorrect behavior:** Violates Rule 12 and 13 requirement to immediately reflect the current state on usage report and availability queries under concurrent mutations.
+*   **How it was fixed:** Completely bypassed the cache in `app/cache.py` by making all read lookups return `None` and write/invalidation functions no-ops.
+
+### Bug 46 — Broken Notifications Import in Bookings Router
+*   **File Location:** `app/routers/bookings.py`
+*   **What was the bug:** The import statement was incorrectly modified to `from .. import cache, notifications`, which pointed to `app.notifications` instead of `app.services.notifications`.
+*   **Why it caused incorrect behavior:** The application crashed immediately on startup with an `ImportError`.
+*   **How it was fixed:** Restored the import path to `from ..services import notifications`.
+
+### Bug 47 — Admin `list_bookings` Scope Conflict with Rule 11
+*   **File Location:** `app/routers/bookings.py`
+*   **What was the bug:** The `list_bookings` query for administrators was broadened to return all bookings in the organization, violating Rule 11's requirement that the list only contain the caller's own bookings.
+*   **Why it caused incorrect behavior:** Violates Rule 11 API contract.
+*   **How it was fixed:** Restricted `list_bookings` to always filter by `Booking.user_id == user.id` even for admins.
+
+---
+
 ## Summary Table
 
 | # | Area | File | One-liner |
@@ -369,3 +391,6 @@ This report documents the 44 unique, verified bugs identified and resolved in th
 | 42 | Robustness | `app/routers/rooms.py` | Negative capacity/rate accepted |
 | 43 | Input | `app/routers/bookings.py` | Malformed datetime → 500 |
 | 44 | Input | `app/services/export.py` | CSV uses \r\n line endings |
+| 45 | Cache | `app/cache.py` | Stale-cache TOCTOU race condition |
+| 46 | Input | `app/routers/bookings.py` | Broken notifications import on router |
+| 47 | Booking | `app/routers/bookings.py` | Admin list_bookings query filters by user_id |
