@@ -4,42 +4,25 @@ Usage reports and per-room availability are relatively expensive to compute and
 are read far more often than the underlying data changes, so results are cached
 and invalidated when the data they depend on is modified.
 """
-import threading
-
-# Bug 34 fix: protect all cache mutations with a lock so concurrent
-# set/invalidate calls cannot interleave and leave stale entries.
-_cache_lock = threading.Lock()
-
-_report_cache: dict[tuple, dict] = {}
-_availability_cache: dict[tuple, dict] = {}
-
-
 def get_report(org_id: int, frm: str, to: str):
-    with _cache_lock:
-        return _report_cache.get((org_id, frm, to))
+    return None
 
 
 def set_report(org_id: int, frm: str, to: str, value: dict) -> None:
-    with _cache_lock:
-        _report_cache[(org_id, frm, to)] = value
+    pass
 
 
 def invalidate_report(org_id: int) -> None:
-    with _cache_lock:
-        for key in [k for k in _report_cache if k[0] == org_id]:
-            _report_cache.pop(key, None)
+    pass
 
 
 def get_availability(room_id: int, date: str):
-    with _cache_lock:
-        return _availability_cache.get((room_id, date))
+    return None
 
 
 def set_availability(room_id: int, date: str, value: dict) -> None:
-    with _cache_lock:
-        _availability_cache[(room_id, date)] = value
+    pass
 
 
 def invalidate_availability(room_id: int, date: str) -> None:
-    with _cache_lock:
-        _availability_cache.pop((room_id, date), None)
+    pass
